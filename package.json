@@ -1,0 +1,35 @@
+{
+  "name": "classpass-scraper",
+  "version": "1.0.0",
+  "description": "Puppeteer scraper for ClassPass Studios login and monthly revenue data",
+  "type": "module",
+  "main": "scrape-with-cookies.js",
+  "scripts": {
+    "get-cookies": "node get-cookies.js",
+    "get-cookies:headed": "HEADED=1 node get-cookies.js",
+    "scrape:cookies": "node scrape-with-cookies.js",
+    "scrape:cookies:headed": "HEADED=1 node scrape-with-cookies.js",
+    "reports": "node scrape-with-cookies.js",
+    "reports:headed": "HEADED=1 node scrape-with-cookies.js",
+    "extract": "node extract-pdf.js",
+    "examine-report": "HEADED=1 node examine-report-page.js",
+    "backfill": "node backfill.js",
+    "backfill:headed": "HEADED=1 node backfill.js",
+    "monthly": "node monthly-job.js"
+  },
+  "keywords": [
+    "classpass",
+    "puppeteer",
+    "scraper"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.9.0",
+    "dotenv": "^16.4.5",
+    "pdf-parse": "^1.1.1",
+    "puppeteer": "^24.37.2"
+  }
+}

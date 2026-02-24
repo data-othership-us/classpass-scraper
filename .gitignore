@@ -1,0 +1,10 @@
+node_modules/
+.env
+cookies.json
+revenue-data.json
+report-page-examine.json
+report-page.html
+report-page-iframe.html
+reports-pdf/
+*.log
+.DS_Store
