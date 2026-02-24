@@ -8,4 +8,4 @@ report-page-iframe.html
 reports-pdf/
 *.log
 .DS_Store
-keys/
+keys/*
