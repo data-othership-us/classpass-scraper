@@ -19,6 +19,37 @@ const REPORT_YEAR = process.env.REPORT_YEAR || "2026";
 const REPORT_MONTH = process.env.REPORT_MONTH || "01";
 const STUDIOS = getStudios(REPORT_YEAR, REPORT_MONTH);
 const HEADED = process.env.HEADED === "1" || process.env.HEADED === "true";
+const CLASSPASS_EMAIL = process.env.CLASSPASS_EMAIL;
+const CLASSPASS_PASSWORD = process.env.CLASSPASS_PASSWORD;
+const CLEAN_EXTRA_PDFS = process.env.CLEAN_EXTRA_PDFS === "1" || process.env.CLEAN_EXTRA_PDFS === "true";
+
+async function loginWithCredentials(page, email, password) {
+  if (!email || !password) return false;
+  try {
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+    const loginFormSelector = 'form[data-cypress="login-form"]';
+    await page.waitForSelector(loginFormSelector, { timeout: 20000 });
+    const emailInput =
+      (await page.$(`${loginFormSelector} input[name="email"]`)) ||
+      (await page.$(`${loginFormSelector} input[type="email"]`));
+    const passwordInput =
+      (await page.$(`${loginFormSelector} input[name="password"]`)) ||
+      (await page.$(`${loginFormSelector} input[type="password"]`));
+    if (!emailInput || !passwordInput) return false;
+
+    await emailInput.click({ clickCount: 3 }).catch(() => {});
+    await emailInput.type(email, { delay: 30 });
+    await passwordInput.click({ clickCount: 3 }).catch(() => {});
+    await passwordInput.type(password, { delay: 30 });
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {}),
+      page.keyboard.press("Enter"),
+    ]);
+    return !page.url().includes("/login");
+  } catch (_) {
+    return false;
+  }
+}
 
 /** Run scrape for current REPORT_YEAR/REPORT_MONTH. Returns revenueData (no file written). */
 export async function runReports() {
@@ -48,16 +79,12 @@ export async function runReports() {
     studios: [],
     extracted: [],
   };
-  const existingFiles = new Set(existsSync(DOWNLOADS_DIR) ? readdirSync(DOWNLOADS_DIR) : []);
+  const makeEmptyRun = () => ({ studios: [], extracted: [], loadFailedCount: 0, sessionExpiredCount: 0 });
 
-  try {
-    console.log("Going to /login to set domain...");
-    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
-    await page.setCookie(...cookies);
-    console.log("Cookies set.\n");
+  async function scrapeStudios(activeCookies) {
+    const run = makeEmptyRun();
+    const existingFiles = new Set(existsSync(DOWNLOADS_DIR) ? readdirSync(DOWNLOADS_DIR) : []);
 
-    console.log("Step 1: Scrape report pages and download PDFs");
-    console.log("----------------------------------------------");
     for (const studio of STUDIOS) {
       console.log(`${studio.name}: ${studio.url}`);
       const { pdfPath, sessionExpired, loadFailed } = await tryDownloadPdfForStudio(
@@ -65,25 +92,27 @@ export async function runReports() {
         studio,
         REPORT_YEAR,
         REPORT_MONTH,
-        cookies,
+        activeCookies,
         existingFiles,
         DOWNLOADS_DIR
       );
 
       if (sessionExpired) {
         console.log("  → Redirected to login (cookies expired).");
-        revenueData.studios.push({ name: studio.name, url: studio.url, error: "Session expired", pdfDownloaded: false });
-        break;
+        run.sessionExpiredCount += 1;
+        run.studios.push({ name: studio.name, url: studio.url, error: "Session expired", pdfDownloaded: false });
+        continue;
       }
       if (loadFailed) {
         console.log("  → Failed to load");
-        revenueData.studios.push({ name: studio.name, url: studio.url, error: "Failed to load page", pdfDownloaded: false });
+        run.loadFailedCount += 1;
+        run.studios.push({ name: studio.name, url: studio.url, error: "Failed to load page", pdfDownloaded: false });
         continue;
       }
 
       const pageText = await page.evaluate(() => document.body?.innerText || "");
       const parsed = parseReportText(pageText);
-      revenueData.extracted.push({
+      run.extracted.push({
         studio: studio.name,
         source: "page",
         earnings: parsed.earnings,
@@ -107,7 +136,7 @@ export async function runReports() {
         console.log("  → No PDF downloaded");
       }
 
-      revenueData.studios.push({
+      run.studios.push({
         name: studio.name,
         url: studio.url,
         pdfDownloaded: !!pdfPath,
@@ -117,7 +146,7 @@ export async function runReports() {
       if (pdfPath) {
         try {
           const data = await extractFromPdf(pdfPath);
-          revenueData.extracted.push({
+          run.extracted.push({
             file: basename(pdfPath),
             studio: studio.name,
             source: "pdf",
@@ -129,21 +158,55 @@ export async function runReports() {
           });
           console.log("  → Extracted from PDF, location from URL:", studio.name);
         } catch (err) {
-          revenueData.extracted.push({ file: basename(pdfPath), studio: studio.name, source: "pdf", error: err.message });
+          run.extracted.push({ file: basename(pdfPath), studio: studio.name, source: "pdf", error: err.message });
         }
       }
 
       await new Promise((r) => setTimeout(r, 1000));
     }
 
-    const expectedPdfs = new Set(STUDIOS.map((s) => `${s.name}-${REPORT_YEAR}-${REPORT_MONTH}.pdf`));
-    const allPdfs = existsSync(DOWNLOADS_DIR) ? readdirSync(DOWNLOADS_DIR).filter((f) => f.endsWith(".pdf")) : [];
-    for (const file of allPdfs) {
-      if (!expectedPdfs.has(file)) {
-        try {
-          unlinkSync(join(DOWNLOADS_DIR, file));
-          console.log("  Removed extra PDF:", file);
-        } catch (_) {}
+    return run;
+  }
+
+  try {
+    console.log("Going to /login to set domain...");
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await page.setCookie(...cookies);
+    console.log("Cookies set.\n");
+
+    console.log("Step 1: Scrape report pages and download PDFs");
+    console.log("----------------------------------------------");
+    let run = await scrapeStudios(cookies);
+    const hasPdf = run.studios.some((s) => s.pdfDownloaded);
+    const hasMetrics = run.extracted.some((e) => e.source === "pdf" || e.earnings || e.reservations != null || e.utilization);
+    const shouldTryCredentialFallback =
+      !hasPdf &&
+      !hasMetrics &&
+      (run.loadFailedCount > 0 || run.sessionExpiredCount > 0);
+
+    if (shouldTryCredentialFallback && CLASSPASS_EMAIL && CLASSPASS_PASSWORD) {
+      console.log("\nNo usable data from cookie pass. Trying credential login fallback once...");
+      const loggedIn = await loginWithCredentials(page, CLASSPASS_EMAIL, CLASSPASS_PASSWORD);
+      if (loggedIn) {
+        const runtimeCookies = await page.cookies().catch(() => cookies);
+        run = await scrapeStudios(runtimeCookies);
+      } else {
+        console.log("Credential login fallback failed.");
+      }
+    }
+    revenueData.studios = run.studios;
+    revenueData.extracted = run.extracted;
+
+    if (CLEAN_EXTRA_PDFS) {
+      const expectedPdfs = new Set(STUDIOS.map((s) => `${s.name}-${REPORT_YEAR}-${REPORT_MONTH}.pdf`));
+      const allPdfs = existsSync(DOWNLOADS_DIR) ? readdirSync(DOWNLOADS_DIR).filter((f) => f.endsWith(".pdf")) : [];
+      for (const file of allPdfs) {
+        if (!expectedPdfs.has(file)) {
+          try {
+            unlinkSync(join(DOWNLOADS_DIR, file));
+            console.log("  Removed extra PDF:", file);
+          } catch (_) {}
+        }
       }
     }
 

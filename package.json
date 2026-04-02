@@ -15,6 +15,8 @@
     "examine-report": "HEADED=1 node examine-report-page.js",
     "backfill": "node backfill.js",
     "backfill:headed": "HEADED=1 node backfill.js",
+    "backfill:replace": "TRUNCATE_FIRST=1 node backfill.js",
+    "backfill:replace:headed": "TRUNCATE_FIRST=1 HEADED=1 node backfill.js",
     "monthly": "node monthly-job.js"
   },
   "keywords": [

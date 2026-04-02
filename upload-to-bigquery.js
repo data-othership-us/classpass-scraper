@@ -13,16 +13,14 @@ import "dotenv/config";
 const MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 
 /**
- * Parse period or report_period into a TIMESTAMP for BigQuery (first day of month, UTC).
+ * Normalize period/reportPeriod into a YYYY-MM month label.
  * @param {string} [period] - e.g. "January 2026"
  * @param {string} [reportPeriod] - e.g. "2026-01"
- * @returns {string|null} ISO timestamp or null
+ * @returns {string|null} Month label or null
  */
-function parseMonthTimestamp(period, reportPeriodStr) {
+function parseMonthLabel(period, reportPeriodStr) {
   if (reportPeriodStr && /^\d{4}-\d{2}$/.test(reportPeriodStr)) {
-    const [y, m] = reportPeriodStr.split("-").map(Number);
-    const d = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
-    return d.toISOString();
+    return reportPeriodStr;
   }
   if (period && typeof period === "string") {
     const match = period.trim().match(/^(\w+)\s+(\d{4})$/i);
@@ -31,8 +29,7 @@ function parseMonthTimestamp(period, reportPeriodStr) {
       const year = parseInt(match[2], 10);
       const monthIndex = MONTH_NAMES.indexOf(monthName);
       if (monthIndex >= 0) {
-        const d = new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
-        return d.toISOString();
+        return `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
       }
     }
   }
@@ -63,13 +60,54 @@ function parseUtilization(utilStr) {
   return null;
 }
 
+function escapeSqlString(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function dedupeRowsByMonthLocation(rows) {
+  const keyed = new Map();
+  const passthrough = [];
+  for (const row of rows) {
+    if (row.month && row.location) {
+      // Last row wins for a given key within this run.
+      keyed.set(`${row.month}__${row.location}`, row);
+    } else {
+      passthrough.push(row);
+    }
+  }
+  return [...keyed.values(), ...passthrough];
+}
+
+async function deleteExistingKeys(bigquery, projectId, datasetId, tableId, rows) {
+  const keys = rows
+    .filter((r) => r.month && r.location)
+    .map((r) => `('${escapeSqlString(r.month)}','${escapeSqlString(r.location)}')`);
+  if (keys.length === 0) return;
+  const deleteQuery = `
+    DELETE FROM \`${projectId}.${datasetId}.${tableId}\`
+    WHERE (month, location) IN (${keys.join(",")})
+  `;
+  await bigquery.query({ query: deleteQuery, useLegacySql: false });
+}
+
+function toTitleCase(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 /**
  * Map one item from revenueData.extracted to your BigQuery row schema:
  * month, location, earnings, currency, reservation, utilization, inserted_at
  */
 function toBigQueryRow(row, reportPeriodStr, scrapedAtStr) {
-  const month = parseMonthTimestamp(row.period, reportPeriodStr);
-  const location = row.studio ?? null;
+  const month = parseMonthLabel(row.period, reportPeriodStr);
+  const location = toTitleCase(row.studio);
   const earnings = parseEarnings(row.earnings);
   const currencyRaw = row.currency ?? null;
   const currency = currencyRaw === "CA" ? "CAD" : currencyRaw;
@@ -117,9 +155,10 @@ export async function uploadToBigQuery(revenueData) {
     console.log(`  [${i}] source=${row.source} file=${row.file ?? "(none)"} studio="${row.studio ?? ""}" earnings=${row.earnings ?? "null"} reservations=${row.reservations ?? "null"} utilization=${row.utilization ?? "null"}`);
   });
 
-  const rows = extracted
+  const mappedRows = extracted
     .map((row) => toBigQueryRow(row, row.reportPeriod ?? reportPeriod, scrapedAt))
     .filter(Boolean);
+  const rows = dedupeRowsByMonthLocation(mappedRows);
 
   console.log("\nRows to insert (after filter: need earnings/reservation/utilization):");
   rows.forEach((r, i) => {
@@ -131,6 +170,7 @@ export async function uploadToBigQuery(revenueData) {
   }
 
   const bigquery = new BigQuery({ projectId: PROJECT_ID });
+  await deleteExistingKeys(bigquery, PROJECT_ID, DATASET_ID, TABLE_ID, rows);
   const table = bigquery.dataset(DATASET_ID).table(TABLE_ID);
   await table.insert(rows);
   return rows.length;
