@@ -12,7 +12,13 @@ import "dotenv/config";
 import { extractFromPdf, parseReportText } from "./extract-pdf.js";
 import { uploadToBigQuery } from "./upload-to-bigquery.js";
 import { COOKIES_FILE, DOWNLOADS_DIR, LOGIN_URL, getStudios } from "./lib/config.js";
-import { getLaunchOptions, USER_AGENT } from "./lib/browser.js";
+import {
+  getLaunchOptions,
+  USER_AGENT,
+  dismissGoogleOrSiteOverlays,
+  installGoogleAccountsPopupCloser,
+  blockGoogleAccountsNavigations,
+} from "./lib/browser.js";
 import { tryDownloadPdfForStudio } from "./lib/pdf-download.js";
 
 const REPORT_YEAR = process.env.REPORT_YEAR || "2026";
@@ -22,6 +28,29 @@ const HEADED = process.env.HEADED === "1" || process.env.HEADED === "true";
 const CLASSPASS_EMAIL = process.env.CLASSPASS_EMAIL;
 const CLASSPASS_PASSWORD = process.env.CLASSPASS_PASSWORD;
 const CLEAN_EXTRA_PDFS = process.env.CLEAN_EXTRA_PDFS === "1" || process.env.CLEAN_EXTRA_PDFS === "true";
+const REPORTS_HOME_URL = "https://studios.classpass.com/stats/reports/monthly";
+
+async function warmupReportsSession(page, label = "cookie") {
+  try {
+    const res = await page.goto(REPORTS_HOME_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    const status = res ? res.status() : null;
+    const currentUrl = page.url();
+    if (currentUrl.includes("/login")) {
+      console.log(`Reports preflight (${label}): redirected to login.`);
+      return false;
+    }
+    if (status != null && status >= 400) {
+      console.log(`Reports preflight (${label}): HTTP ${status} at ${currentUrl}`);
+      return false;
+    }
+    console.log(`Reports preflight (${label}): OK (${status ?? "no-status"})`);
+    await dismissGoogleOrSiteOverlays(page);
+    return true;
+  } catch (err) {
+    console.log(`Reports preflight (${label}) failed: ${err.message}`);
+    return false;
+  }
+}
 
 async function loginWithCredentials(page, email, password) {
   if (!email || !password) return false;
@@ -65,7 +94,9 @@ export async function runReports() {
   }
 
   const browser = await puppeteer.launch(getLaunchOptions(HEADED));
+  installGoogleAccountsPopupCloser(browser);
   const page = await browser.newPage();
+  await blockGoogleAccountsNavigations(page);
 
   mkdirSync(DOWNLOADS_DIR, { recursive: true });
   const client = await page.createCDPSession();
@@ -87,7 +118,7 @@ export async function runReports() {
 
     for (const studio of STUDIOS) {
       console.log(`${studio.name}: ${studio.url}`);
-      const { pdfPath, sessionExpired, loadFailed } = await tryDownloadPdfForStudio(
+      const { pdfPath, sessionExpired, loadFailed, loadError, statusCode } = await tryDownloadPdfForStudio(
         page,
         studio,
         REPORT_YEAR,
@@ -104,9 +135,17 @@ export async function runReports() {
         continue;
       }
       if (loadFailed) {
-        console.log("  → Failed to load");
+        const loadMessage = loadError || "Failed to load page";
+        console.log("  → Failed to load:", loadMessage);
         run.loadFailedCount += 1;
-        run.studios.push({ name: studio.name, url: studio.url, error: "Failed to load page", pdfDownloaded: false });
+        run.studios.push({
+          name: studio.name,
+          url: studio.url,
+          error: "Failed to load page",
+          errorDetails: loadMessage,
+          statusCode: statusCode ?? undefined,
+          pdfDownloaded: false,
+        });
         continue;
       }
 
@@ -173,23 +212,25 @@ export async function runReports() {
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
     await page.setCookie(...cookies);
     console.log("Cookies set.\n");
+    const cookieSessionOk = await warmupReportsSession(page, "cookie");
 
     console.log("Step 1: Scrape report pages and download PDFs");
     console.log("----------------------------------------------");
-    let run = await scrapeStudios(cookies);
+    let run = cookieSessionOk ? await scrapeStudios(cookies) : makeEmptyRun();
     const hasPdf = run.studios.some((s) => s.pdfDownloaded);
     const hasMetrics = run.extracted.some((e) => e.source === "pdf" || e.earnings || e.reservations != null || e.utilization);
     const shouldTryCredentialFallback =
       !hasPdf &&
       !hasMetrics &&
-      (run.loadFailedCount > 0 || run.sessionExpiredCount > 0);
+      (!cookieSessionOk || run.loadFailedCount > 0 || run.sessionExpiredCount > 0);
 
     if (shouldTryCredentialFallback && CLASSPASS_EMAIL && CLASSPASS_PASSWORD) {
       console.log("\nNo usable data from cookie pass. Trying credential login fallback once...");
       const loggedIn = await loginWithCredentials(page, CLASSPASS_EMAIL, CLASSPASS_PASSWORD);
       if (loggedIn) {
         const runtimeCookies = await page.cookies().catch(() => cookies);
-        run = await scrapeStudios(runtimeCookies);
+        const credentialSessionOk = await warmupReportsSession(page, "credential");
+        run = credentialSessionOk ? await scrapeStudios(runtimeCookies) : makeEmptyRun();
       } else {
         console.log("Credential login fallback failed.");
       }

@@ -7,7 +7,12 @@ import puppeteer from "puppeteer";
 import { existsSync, writeFileSync } from "fs";
 import "dotenv/config";
 import { COOKIES_FILE, LOGIN_URL } from "./lib/config.js";
-import { getLaunchOptions, USER_AGENT } from "./lib/browser.js";
+import {
+  getLaunchOptions,
+  USER_AGENT,
+  installGoogleAccountsPopupCloser,
+  blockGoogleAccountsNavigations,
+} from "./lib/browser.js";
 
 const EMAIL = process.env.CLASSPASS_EMAIL;
 const PASSWORD = process.env.CLASSPASS_PASSWORD;
@@ -20,7 +25,9 @@ if (!EMAIL || !PASSWORD) {
 
 async function main() {
   const browser = await puppeteer.launch(getLaunchOptions(HEADED));
+  installGoogleAccountsPopupCloser(browser);
   const page = await browser.newPage();
+  await blockGoogleAccountsNavigations(page);
   await page.setUserAgent(USER_AGENT);
 
   try {

@@ -20,7 +20,12 @@ import {  COOKIES_FILE,
   getLastCompletedMonth,
   STUDIO_IDS,
 } from "./lib/config.js";
-import { getLaunchOptions, USER_AGENT } from "./lib/browser.js";
+import {
+  getLaunchOptions,
+  USER_AGENT,
+  installGoogleAccountsPopupCloser,
+  blockGoogleAccountsNavigations,
+} from "./lib/browser.js";
 import { tryDownloadPdfForStudio } from "./lib/pdf-download.js";
 
 const HEADED = process.env.HEADED === "1" || process.env.HEADED === "true";
@@ -135,7 +140,9 @@ async function main() {
     if (browserSessionReady && page) return;
     if (!browser) {
       browser = await puppeteer.launch(getLaunchOptions(HEADED));
+      installGoogleAccountsPopupCloser(browser);
       page = await browser.newPage();
+      await blockGoogleAccountsNavigations(page);
       const client = await page.createCDPSession();
       await client.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: DOWNLOADS_DIR });
       await page.setUserAgent(USER_AGENT);

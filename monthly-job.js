@@ -8,7 +8,8 @@
 
 import "dotenv/config";
 import { uploadToBigQuery } from "./upload-to-bigquery.js";
-import { getLastCompletedMonth } from "./lib/config.js";
+import { getLastCompletedMonth, STUDIO_IDS } from "./lib/config.js";
+import { notifySlackMonthlyInsert } from "./lib/slack-notify.js";
 
 async function main() {
   const { year, month } = getLastCompletedMonth();
@@ -29,9 +30,23 @@ async function main() {
     extracted: (revenueData.extracted || []).map((row) => ({ ...row, reportPeriod })),
   };
 
+  const hasUsableMetrics = (withPeriod.extracted || []).some(
+    (row) => row?.earnings || row?.reservations != null || row?.utilization
+  );
+  const studioErrors = (withPeriod.studios || []).filter((studio) => studio?.error);
+  if (!hasUsableMetrics && studioErrors.length > 0) {
+    const errorSummary = studioErrors.map((s) => `${s.name}: ${s.errorDetails || s.error}`).join(" | ");
+    throw new Error(`Monthly scrape produced no usable metrics. Studio errors: ${errorSummary}`);
+  }
+
   if (process.env.GOOGLE_CLOUD_PROJECT && process.env.BIGQUERY_DATASET && process.env.BIGQUERY_TABLE) {
     const inserted = await uploadToBigQuery(withPeriod);
     console.log("BigQuery: inserted", inserted, "row(s).");
+    await notifySlackMonthlyInsert({
+      reportPeriod,
+      rowsInserted: inserted,
+      expectedRows: STUDIO_IDS.length,
+    });
   } else {
     console.log("BigQuery env not set. No upload.");
   }
